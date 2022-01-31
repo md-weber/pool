@@ -284,6 +284,28 @@ func (t *Ticket) OrderDigest() ([32]byte, error) {
 	return sha256.Sum256(msg.Bytes()), nil
 }
 
+// MatchesProvider checks if the ticket provider nodePubKey matches the
+// provided nodePubKey.
+func (t *Ticket) MatchesProvider(nodePubKey *btcec.PublicKey) bool {
+	return t.Offer.SignPubKey.IsEqual(nodePubKey)
+}
+
+// MatchesRecipient checks if the ticket recipient nodePubKey matches the
+// provided nodePubKey.
+func (t *Ticket) MatchesRecipient(nodePubKey *btcec.PublicKey) bool {
+	if t.Recipient == nil {
+		return false
+	}
+
+	return t.Recipient.NodePubKey.IsEqual(nodePubKey)
+}
+
+// IsExpectingAChannel returns if the recipient node is currently expecting a
+// channel for this ticket.
+func (t *Ticket) IsExpectingAChannel() bool {
+	return t.State == StateExpectingChannel
+}
+
 // Store is the interface a persistent storage must implement for storing and
 // retrieving sidecar tickets.
 type Store interface {

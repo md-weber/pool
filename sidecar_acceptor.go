@@ -177,97 +177,94 @@ func (a *SidecarAcceptor) resumeTicket(t *sidecar.Ticket) error {
 	return nil
 }
 
+// newTicketNegotiator returns a new sidecar negotiator for the ticket.
+func (a *SidecarAcceptor) newTicketNegotiator(
+	ticket *sidecar.Ticket) (*SidecarNegotiator, error) {
+
+	switch {
+	case ticket.MatchesProvider(a.cfg.NodePubKey):
+		return a.newProviderNegotiator(ticket)
+	case ticket.MatchesRecipient(a.cfg.NodePubKey):
+		return a.newRecipientNegotiator(ticket), nil
+	}
+
+	return nil, fmt.Errorf("unable to resume determine our role for "+
+		"ticket=%x", ticket.ID)
+}
+
+// newProviderNegotiator returns a new negotiator for the `Provider` role.
+func (a *SidecarAcceptor) newProviderNegotiator(
+	ticket *sidecar.Ticket) (*SidecarNegotiator, error) {
+
+	acct, err := a.cfg.AcctDB.Account(ticket.Offer.SignPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch account for sidecar "+
+			"ticket=%x, %w", ticket.ID, err)
+	}
+
+	// As we're the provider of this ticket, we'll need to fetch the bid
+	// that goes along with it so we can submit it to the auctioneer once
+	// we've gathered all the necessary materials.
+	ticketBid, err := a.cfg.FetchSidecarBid(ticket)
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch sidecar bid for "+
+			"ticket=%x, %w", ticket.ID, err)
+	}
+
+	negotiatior := NewSidecarNegotiator(AutoAcceptorConfig{
+		Provider:    true,
+		ProviderBid: ticketBid,
+		StartingPkt: &SidecarPacket{
+			CurrentState:   ticket.State,
+			ReceiverTicket: ticket,
+			ProviderTicket: ticket,
+		},
+		ProviderAccount: acct,
+		Driver:          a,
+		MailBox:         a,
+	})
+
+	return negotiatior, nil
+}
+
+// newRecipientNegotiator returns a new negotiator for the `Recipient` role.
+func (a *SidecarAcceptor) newRecipientNegotiator(
+	ticket *sidecar.Ticket) *SidecarNegotiator {
+
+	return NewSidecarNegotiator(AutoAcceptorConfig{
+		Provider: false,
+		StartingPkt: &SidecarPacket{
+			CurrentState:   ticket.State,
+			ReceiverTicket: ticket,
+			ProviderTicket: ticket,
+		},
+		Driver:  a,
+		MailBox: a,
+	})
+}
+
 // resumeAutoTicket adds a new negotiator for tickets that need to be
 // negotiated automatically. The ticket needs to be in a valid state.
 func (a *SidecarAcceptor) resumeAutoTicket(ticket *sidecar.Ticket) error {
-	// In order to determine our role, we'll first need to see
-	// if the account for the offer exists in our database. If
-	// not, then we're the recipient.
-	acct, err := a.cfg.AcctDB.Account(ticket.Offer.SignPubKey)
-	switch {
-	// If we can't find the account, then we assume that
-	// we're the recipient, so we'll attempt to accept the
-	// sidecar ticket.
-	case err == clientdb.ErrAccountNotFound:
-
-		autoAcceptor := NewSidecarNegotiator(AutoAcceptorConfig{
-			Provider: false,
-			StartingPkt: &SidecarPacket{
-				CurrentState:   ticket.State,
-				ReceiverTicket: ticket,
-				ProviderTicket: ticket,
-			},
-			Driver:  a,
-			MailBox: a,
-		})
-		if err := autoAcceptor.Start(); err != nil {
-			return err
-		}
-
-		streamID, err := deriveRecipientStreamID(ticket)
-		if err != nil {
-			return fmt.Errorf("unable to derive "+
-				"stream IDs: %v", err)
-		}
-
-		a.Lock()
-		a.negotiators[streamID] = autoAcceptor
-		a.Unlock()
-
-	// Otherwise, we're on the other end of things, so
-	// we'll assume the role of the provider.
-	case err == nil:
-		// As we're the provider of this ticket, we'll
-		// need to fetch the bid that goes along with
-		// it so we can submit it to the auctioneer
-		// once we've gathered all the necessary
-		// materials.
-		ticketBid, err := a.cfg.FetchSidecarBid(ticket)
-		if err != nil {
-			return fmt.Errorf("unable to fetch "+
-				"sidecar bid: %w", err)
-		}
-
-		// If we're resuming the ticket, and it's still
-		// in the offered state, then we'll reset our
-		// state so wer send a message to the other
-		// party to have them re-send their registered
-		// ticket.
-		state := ticket.State
-		if state == sidecar.StateOffered {
-			state = sidecar.StateCreated
-		}
-
-		autoAcceptor := NewSidecarNegotiator(AutoAcceptorConfig{
-			Provider:    true,
-			ProviderBid: ticketBid,
-			StartingPkt: &SidecarPacket{
-				CurrentState:   state,
-				ReceiverTicket: ticket,
-				ProviderTicket: ticket,
-			},
-			ProviderAccount: acct,
-			Driver:          a,
-			MailBox:         a,
-		})
-		if err := autoAcceptor.Start(); err != nil {
-			return err
-		}
-
-		streamID, err := deriveRecipientStreamID(ticket)
-		if err != nil {
-			return fmt.Errorf("unable to derive "+
-				"stream IDs: %v", err)
-		}
-
-		a.Lock()
-		a.negotiators[streamID] = autoAcceptor
-		a.Unlock()
-
-	default:
-		return fmt.Errorf("unable to fetch account "+
-			"for sidecar: %w", err)
+	negotiator, err := a.newTicketNegotiator(ticket)
+	if err != nil {
+		return fmt.Errorf("unable to create negotiator for ticket=%x, "+
+			"%v", ticket.ID, err)
 	}
+
+	if err := negotiator.Start(); err != nil {
+		return err
+	}
+
+	streamID, err := deriveRecipientStreamID(ticket)
+	if err != nil {
+		return fmt.Errorf("unable to derive "+
+			"stream IDs: %v", err)
+	}
+
+	a.Lock()
+	a.negotiators[streamID] = negotiator
+	a.Unlock()
 
 	return nil
 }
